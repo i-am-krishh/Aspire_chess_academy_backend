@@ -1,27 +1,14 @@
 const express = require('express');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const { body, validationResult } = require('express-validator');
 const Student = require('../models/Student');
 const { auth, adminOnly } = require('../middleware/auth');
+const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../config/cloudinary');
 
 const router = express.Router();
 
-// Configure multer for student image uploads
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const uploadPath = 'uploads/students';
-    if (!fs.existsSync(uploadPath)) {
-      fs.mkdirSync(uploadPath, { recursive: true });
-    }
-    cb(null, uploadPath);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, 'student-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
+// Configure multer for memory storage (we'll upload to Cloudinary)
+const storage = multer.memoryStorage();
 
 const upload = multer({
   storage: storage,
@@ -235,10 +222,25 @@ router.post('/', [auth, adminOnly, upload.single('image'), handleFormDataArrays,
     }
 
     const studentData = req.body;
+    let cloudinaryResult = null;
     
-    // Add image URL if uploaded
+    // Upload image to Cloudinary if uploaded
     if (req.file) {
-      studentData.image = `/uploads/students/${req.file.filename}`;
+      console.log('Uploading image to Cloudinary...');
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      const publicId = `student-${uniqueSuffix}`;
+      
+      try {
+        cloudinaryResult = await uploadToCloudinary(req.file.buffer, 'students', publicId);
+        studentData.image = cloudinaryResult.secure_url;
+        console.log('Image uploaded to Cloudinary:', cloudinaryResult.secure_url);
+      } catch (uploadError) {
+        console.error('Cloudinary upload error:', uploadError);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to upload image to cloud storage'
+        });
+      }
     }
     
     const student = new Student(studentData);
@@ -254,11 +256,13 @@ router.post('/', [auth, adminOnly, upload.single('image'), handleFormDataArrays,
   } catch (error) {
     console.error('Create student error:', error);
     
-    // Clean up uploaded file if there was an error
-    if (req.file) {
-      const filePath = req.file.path;
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
+    // Clean up Cloudinary image if there was an error
+    if (cloudinaryResult) {
+      try {
+        await deleteFromCloudinary(cloudinaryResult.public_id);
+        console.log('Cleaned up Cloudinary image after error');
+      } catch (cleanupError) {
+        console.error('Failed to cleanup Cloudinary image:', cleanupError);
       }
     }
     
@@ -295,18 +299,39 @@ router.put('/:id', [auth, adminOnly, upload.single('image'), handleFormDataArray
     }
 
     const updateData = req.body;
+    let cloudinaryResult = null;
+    let oldImagePublicId = null;
     
-    // Add image URL if uploaded
+    // Get existing student to check for old image
+    const existingStudent = await Student.findById(req.params.id);
+    if (!existingStudent) {
+      return res.status(404).json({
+        success: false,
+        message: 'Student not found'
+      });
+    }
+    
+    // Upload new image to Cloudinary if uploaded
     if (req.file) {
-      updateData.image = `/uploads/students/${req.file.filename}`;
+      console.log('Uploading new image to Cloudinary...');
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      const publicId = `student-${uniqueSuffix}`;
       
-      // Delete old image if it exists
-      const existingStudent = await Student.findById(req.params.id);
-      if (existingStudent && existingStudent.image && existingStudent.image.startsWith('/uploads/')) {
-        const oldImagePath = path.join(__dirname, '..', existingStudent.image);
-        if (fs.existsSync(oldImagePath)) {
-          fs.unlinkSync(oldImagePath);
+      try {
+        cloudinaryResult = await uploadToCloudinary(req.file.buffer, 'students', publicId);
+        updateData.image = cloudinaryResult.secure_url;
+        console.log('New image uploaded to Cloudinary:', cloudinaryResult.secure_url);
+        
+        // Extract old image public ID for cleanup
+        if (existingStudent.image) {
+          oldImagePublicId = extractPublicId(existingStudent.image);
         }
+      } catch (uploadError) {
+        console.error('Cloudinary upload error:', uploadError);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to upload image to cloud storage'
+        });
       }
     }
     
@@ -316,11 +341,15 @@ router.put('/:id', [auth, adminOnly, upload.single('image'), handleFormDataArray
       { new: true, runValidators: true }
     );
 
-    if (!student) {
-      return res.status(404).json({
-        success: false,
-        message: 'Student not found'
-      });
+    // Clean up old image from Cloudinary after successful update
+    if (oldImagePublicId && cloudinaryResult) {
+      try {
+        await deleteFromCloudinary(oldImagePublicId);
+        console.log('Old image deleted from Cloudinary');
+      } catch (deleteError) {
+        console.error('Failed to delete old image from Cloudinary:', deleteError);
+        // Don't fail the request for cleanup errors
+      }
     }
 
     res.json({
@@ -331,9 +360,15 @@ router.put('/:id', [auth, adminOnly, upload.single('image'), handleFormDataArray
   } catch (error) {
     console.error('Update student error:', error);
     
-    // Clean up uploaded file if there was an error
-    if (req.file) {
-      const filePath = req.file.path;
+    // Clean up new Cloudinary image if there was an error
+    if (cloudinaryResult) {
+      try {
+        await deleteFromCloudinary(cloudinaryResult.public_id);
+        console.log('Cleaned up new Cloudinary image after error');
+      } catch (cleanupError) {
+        console.error('Failed to cleanup new Cloudinary image:', cleanupError);
+      }
+    }
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }
@@ -405,7 +440,7 @@ router.patch('/:id/toggle-status', [auth, adminOnly], async (req, res) => {
 // @access  Private (Admin only)
 router.delete('/:id', [auth, adminOnly], async (req, res) => {
   try {
-    const student = await Student.findByIdAndDelete(req.params.id);
+    const student = await Student.findById(req.params.id);
 
     if (!student) {
       return res.status(404).json({
@@ -413,6 +448,23 @@ router.delete('/:id', [auth, adminOnly], async (req, res) => {
         message: 'Student not found'
       });
     }
+
+    // Delete image from Cloudinary if it exists
+    if (student.image) {
+      const publicId = extractPublicId(student.image);
+      if (publicId) {
+        try {
+          await deleteFromCloudinary(publicId);
+          console.log('Student image deleted from Cloudinary');
+        } catch (deleteError) {
+          console.error('Failed to delete image from Cloudinary:', deleteError);
+          // Don't fail the request for cleanup errors
+        }
+      }
+    }
+
+    // Delete student from database
+    await Student.findByIdAndDelete(req.params.id);
 
     res.json({
       success: true,

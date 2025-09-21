@@ -1,27 +1,14 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const Tournament = require('../models/Tournament');
 const { auth, adminOnly } = require('../middleware/auth');
+const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../config/cloudinary');
 
 const router = express.Router();
 
-// Configure multer for poster image uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadPath = 'uploads/posters';
-    if (!fs.existsSync(uploadPath)) {
-      fs.mkdirSync(uploadPath, { recursive: true });
-    }
-    cb(null, uploadPath);
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, 'poster-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
+// Configure multer for memory storage (we'll upload to Cloudinary)
+const storage = multer.memoryStorage();
 
 const upload = multer({
   storage,
@@ -282,10 +269,6 @@ router.post('/', [auth, adminOnly, upload.single('posterImage'), ...tournamentVa
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      // Clean up uploaded file if validation fails
-      if (req.file) {
-        fs.unlinkSync(req.file.path);
-      }
       return res.status(400).json({
         success: false,
         message: 'Validation failed',
@@ -294,10 +277,25 @@ router.post('/', [auth, adminOnly, upload.single('posterImage'), ...tournamentVa
     }
 
     const tournamentData = req.body;
+    let cloudinaryResult = null;
     
-    // Add poster image URL if uploaded
+    // Upload poster image to Cloudinary if uploaded
     if (req.file) {
-      tournamentData.posterImage = `/uploads/posters/${req.file.filename}`;
+      console.log('Uploading poster to Cloudinary...');
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      const publicId = `poster-${uniqueSuffix}`;
+      
+      try {
+        cloudinaryResult = await uploadToCloudinary(req.file.buffer, 'posters', publicId);
+        tournamentData.posterImage = cloudinaryResult.secure_url;
+        console.log('Poster uploaded to Cloudinary:', cloudinaryResult.secure_url);
+      } catch (uploadError) {
+        console.error('Cloudinary upload error:', uploadError);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to upload poster to cloud storage'
+        });
+      }
     }
 
     console.log('About to save tournament:', tournamentData);
@@ -311,9 +309,14 @@ router.post('/', [auth, adminOnly, upload.single('posterImage'), ...tournamentVa
       data: tournament
     });
   } catch (error) {
-    // Clean up uploaded file if save fails
-    if (req.file) {
-      fs.unlinkSync(req.file.path);
+    // Clean up Cloudinary image if there was an error
+    if (cloudinaryResult) {
+      try {
+        await deleteFromCloudinary(cloudinaryResult.public_id);
+        console.log('Cleaned up Cloudinary poster after error');
+      } catch (cleanupError) {
+        console.error('Failed to cleanup Cloudinary poster:', cleanupError);
+      }
     }
     console.error('Create tournament error:', error);
     res.status(500).json({ 
@@ -330,9 +333,6 @@ router.put('/:id', [auth, adminOnly, upload.single('posterImage'), ...tournament
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      if (req.file) {
-        fs.unlinkSync(req.file.path);
-      }
       return res.status(400).json({
         success: false,
         message: 'Validation failed',
@@ -343,9 +343,6 @@ router.put('/:id', [auth, adminOnly, upload.single('posterImage'), ...tournament
     const tournament = await Tournament.findById(req.params.id);
     
     if (!tournament) {
-      if (req.file) {
-        fs.unlinkSync(req.file.path);
-      }
       return res.status(404).json({ 
         success: false, 
         message: 'Tournament not found' 
@@ -353,21 +350,46 @@ router.put('/:id', [auth, adminOnly, upload.single('posterImage'), ...tournament
     }
 
     const updateData = req.body;
+    let cloudinaryResult = null;
+    let oldImagePublicId = null;
     
     // Handle poster image update
     if (req.file) {
-      // Delete old image if exists
-      if (tournament.posterImage) {
-        const oldImagePath = path.join(__dirname, '..', tournament.posterImage);
-        if (fs.existsSync(oldImagePath)) {
-          fs.unlinkSync(oldImagePath);
+      console.log('Uploading new poster to Cloudinary...');
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      const publicId = `poster-${uniqueSuffix}`;
+      
+      try {
+        cloudinaryResult = await uploadToCloudinary(req.file.buffer, 'posters', publicId);
+        updateData.posterImage = cloudinaryResult.secure_url;
+        console.log('New poster uploaded to Cloudinary:', cloudinaryResult.secure_url);
+        
+        // Extract old image public ID for cleanup
+        if (tournament.posterImage) {
+          oldImagePublicId = extractPublicId(tournament.posterImage);
         }
+      } catch (uploadError) {
+        console.error('Cloudinary upload error:', uploadError);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to upload poster to cloud storage'
+        });
       }
-      updateData.posterImage = `/uploads/posters/${req.file.filename}`;
     }
 
     Object.assign(tournament, updateData);
     await tournament.save();
+
+    // Clean up old image from Cloudinary after successful update
+    if (oldImagePublicId && cloudinaryResult) {
+      try {
+        await deleteFromCloudinary(oldImagePublicId);
+        console.log('Old poster deleted from Cloudinary');
+      } catch (deleteError) {
+        console.error('Failed to delete old poster from Cloudinary:', deleteError);
+        // Don't fail the request for cleanup errors
+      }
+    }
 
     res.json({
       success: true,
@@ -375,6 +397,15 @@ router.put('/:id', [auth, adminOnly, upload.single('posterImage'), ...tournament
       data: tournament
     });
   } catch (error) {
+    // Clean up new Cloudinary image if there was an error
+    if (cloudinaryResult) {
+      try {
+        await deleteFromCloudinary(cloudinaryResult.public_id);
+        console.log('Cleaned up new Cloudinary poster after error');
+      } catch (cleanupError) {
+        console.error('Failed to cleanup new Cloudinary poster:', cleanupError);
+      }
+    }
     if (req.file) {
       fs.unlinkSync(req.file.path);
     }
@@ -545,11 +576,17 @@ router.delete('/:id', [auth, adminOnly], async (req, res) => {
       });
     }
 
-    // Delete poster image if exists
+    // Delete poster image from Cloudinary if exists
     if (tournament.posterImage) {
-      const imagePath = path.join(__dirname, '..', tournament.posterImage);
-      if (fs.existsSync(imagePath)) {
-        fs.unlinkSync(imagePath);
+      const publicId = extractPublicId(tournament.posterImage);
+      if (publicId) {
+        try {
+          await deleteFromCloudinary(publicId);
+          console.log('Tournament poster deleted from Cloudinary');
+        } catch (deleteError) {
+          console.error('Failed to delete poster from Cloudinary:', deleteError);
+          // Don't fail the request for cleanup errors
+        }
       }
     }
 
