@@ -26,9 +26,12 @@ router.post('/login', [
     .withMessage('Password must be at least 6 characters long')
 ], async (req, res) => {
   try {
+    console.log('Login attempt started:', { email: req.body.email });
+    
     // Check for validation errors
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      console.log('Validation errors:', errors.array());
       return res.status(400).json({
         message: 'Validation failed',
         errors: errors.array()
@@ -40,19 +43,24 @@ router.post('/login', [
     // Check if user exists
     const user = await User.findOne({ email });
     if (!user) {
+      console.log('User not found for email:', email);
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
     // Check if account is active
     if (!user.isActive) {
+      console.log('Account is deactivated for email:', email);
       return res.status(401).json({ message: 'Account is deactivated' });
     }
 
     // Verify password
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
+      console.log('Password verification failed for email:', email);
       return res.status(401).json({ message: 'Invalid credentials' });
     }
+
+    console.log('Password verified successfully for email:', email);
 
     // Update last login
     user.lastLogin = new Date();
@@ -60,6 +68,8 @@ router.post('/login', [
 
     // Generate token
     const token = generateToken(user._id);
+    
+    console.log('Login successful for email:', email);
 
     res.json({
       message: 'Login successful',
