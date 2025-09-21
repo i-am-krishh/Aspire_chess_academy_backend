@@ -369,10 +369,6 @@ router.put('/:id', [auth, adminOnly, upload.single('image'), handleFormDataArray
         console.error('Failed to cleanup new Cloudinary image:', cleanupError);
       }
     }
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-      }
-    }
     
     if (error.name === 'CastError') {
       return res.status(400).json({

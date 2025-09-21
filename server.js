@@ -30,7 +30,7 @@ app.use(limiter);
 // CORS configuration
 const corsOptions = {
   origin: process.env.NODE_ENV === 'production' 
-    ? ['https://aspirechessacademy.com'] 
+    ? ['https://aspire-chess-academy.vercel.app'] 
     : ['https://aspire-chess-academy.vercel.app', 'http://localhost:5173'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
