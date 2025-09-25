@@ -23,6 +23,12 @@ const studentSchema = new mongoose.Schema({
     required: [true, 'Peak rating is required'],
     trim: true
   },
+  fideId: {
+    type: String,
+    trim: true,
+    match: [/^[0-9]{8}$/, 'FIDE ID must be exactly 8 digits'],
+    sparse: true // Allows null/undefined values while maintaining uniqueness for existing values
+  },
   program: {
     type: String,
     required: [true, 'Program is required'],
