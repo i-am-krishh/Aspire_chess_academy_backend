@@ -10,6 +10,7 @@ require('dotenv').config();
 const authRoutes = require('./routes/auth');
 const studentRoutes = require('./routes/students');
 const tournamentRoutes = require('./routes/tournaments');
+const enrollmentRoutes = require('./routes/enrollments');
 
 const app = express();
 
@@ -71,6 +72,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/api/auth', authRoutes);
 app.use('/api/students', studentRoutes);
 app.use('/api/tournaments', tournamentRoutes);
+app.use('/api/enrollments', enrollmentRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
