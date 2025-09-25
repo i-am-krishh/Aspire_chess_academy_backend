@@ -303,11 +303,7 @@ router.patch('/:id/contact', auth, adminOnly, async (req, res) => {
 // @access  Private/Admin
 router.delete('/:id', auth, adminOnly, async (req, res) => {
   try {
-    const enrollment = await Enrollment.findByIdAndUpdate(
-      req.params.id,
-      { isActive: false },
-      { new: true }
-    )
+    const enrollment = await Enrollment.findByIdAndDelete(req.params.id)
 
     if (!enrollment) {
       return res.status(404).json({
@@ -322,6 +318,12 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
     })
   } catch (error) {
     console.error('Error deleting enrollment:', error)
+    if (error.name === 'CastError') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid enrollment ID'
+      })
+    }
     res.status(500).json({
       success: false,
       message: 'Error deleting enrollment inquiry'
